@@ -1,0 +1,94 @@
+#' Prepare a raster for the use in Blender
+#'
+#' @param demSource Path to a raster-file that \code{gdal} can read
+#' @param bbSource Path to a vector-file that \code{gdal} can read
+#' @param resX The output resolution (X) in units of the DEM's CRS
+#' @param resY The output resolution (Y) in units of the DEM's CRS
+#' @param add.x Percentage of new border in x-directions (new columns)
+#' @param add.y Percentage of new border in y-directions (new rows)
+#' @param dsn  The path to the output file
+#'
+#' @return
+#' @export
+#'
+#' @examples
+prepareDEM = function(demSource = NULL,
+                      bbSource = NULL,
+                      resX = NULL,
+                      resY = NULL,
+                      add.x = NULL,
+                      add.y = NULL,
+                      dsn = NULL) {
+
+  # read original dem
+  cli::cli_h1("Reading the dem")
+  dem_raw = stars::read_stars(demSource)
+  # rast = terra::rast(demSource)
+
+  # if no bounding Source -> use entrire Raster and
+  # build the bounding box for potential later use
+  cli::cli_h1("Building the bounding box")
+  if (is.null(bbSource)) {
+    bb = st_bbox(dem_raw)
+  } else{
+    shape_to_crop = sf::read_sf(bbSource)
+    # Making CRS equal
+    cli::cli_alert("Making CRSs equal")
+    if (!st_crs(dem_raw) == st_crs(shape_to_crop)) {
+      shape_to_crop = st_transform(shape_to_crop, st_crs(dem_raw))
+    }
+    bb = shape_to_crop %>% sf::st_bbox()
+  }
+
+
+  # if bbSource -> crop the DEM
+  if (!is.null(bbSource)) {
+    cli::cli_h1("Cropping the Raster")
+    dem_raw = sf::st_crop(dem_raw, shape_to_crop)
+  }
+
+  # DIMENSIONS OF THE INPUT RASTER
+  dims = stars::st_dimensions(dem_raw)
+
+  # 1. resample to desired output resolution
+  if (!is.null(resX) | !is.null(resY)) {
+    cli::cli_h1("Resampling")
+    # setup the grid
+    grid = stars::st_as_stars(bb, dx = resX, dy = resY)
+    # get the new dimensions
+    new_dims = stars::st_dimensions(grid)
+    # warp the old dem to the new grid
+    dem_resamp = stars::st_warp(dem_raw, grid)
+  } else{
+    cli::cli_h1("No resampling necessary")
+    dem_resamp = dem_raw
+  }
+
+  # 2. Rescale the values from 0 -> 65535
+  cli::cli_h1("Rescaling")
+  vals = dem_resamp[[1]]
+  vals_rescaled = scales::rescale(vals, to = c(0, 65535), from = c(min(vals, na.rm = T), max(vals, na.rm = T)))
+  dem_resamp[[1]] = vals_rescaled
+
+  # 3. add "border"
+  cli::cli_h1("Adding Border")
+  if (!is.null(add.x) && !is.null(add.y)) {
+    dem_resamp = make_border(dem_resamp, add.x, add.y)
+  }
+
+  # 4. write it out as Uint16
+  cli::cli_h1("Writing it out")
+  if (is.null(dsn))
+    stop("Provide an output filename")
+  filename = basename(dsn)
+  directory = dirname(dsn)
+  if (!dir.exists(directory)){
+    dir.create(directory, recursive = T)
+  }
+  stars::write_stars(dem_resamp, dsn, type = "UInt16", NA_value=NA_real_)
+
+  png = sub("\\..*$", ".png", dsn)
+  cmd = glue::glue('convert {dsn} -transparent black {png}')
+  system(cmd)
+
+}
