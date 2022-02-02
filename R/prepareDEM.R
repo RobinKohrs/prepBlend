@@ -29,7 +29,7 @@ prepareDEM = function(demSource = NULL,
   # build the bounding box for potential later use
   cli::cli_h1("Building the bounding box")
   if (is.null(bbSource)) {
-    bb = st_bbox(dem_raw)
+    bb = sf::st_bbox(dem_raw)
   } else{
     shape_to_crop = sf::read_sf(bbSource)
     # Making CRS equal
@@ -52,13 +52,14 @@ prepareDEM = function(demSource = NULL,
 
   # 1. resample to desired output resolution
   if (!is.null(resX) | !is.null(resY)) {
+
+    # use a command line call as st_warp crashes R
     cli::cli_h1("Resampling")
-    # setup the grid
-    grid = stars::st_as_stars(bb, dx = resX, dy = resY)
-    # get the new dimensions
-    new_dims = stars::st_dimensions(grid)
-    # warp the old dem to the new grid
-    dem_resamp = stars::st_warp(dem_raw, grid)
+    tmpName_resamp = paste(tempdir(), "/temp_resamp.tif", sep="")
+    cmd = glue::glue("gdalwarp -tr {resX} {resY} {demSource} {tmpName_resamp}")
+    system(cmd)
+    dem_resamp = stars::read_stars(tmpName_resamp)
+
   } else{
     cli::cli_h1("No resampling necessary")
     dem_resamp = dem_raw
@@ -66,20 +67,26 @@ prepareDEM = function(demSource = NULL,
 
   # 2. Rescale the values from 0 -> 65535
   cli::cli_h1("Rescaling")
-  vals = dem_resamp[[1]]
-  vals_rescaled = scales::rescale(vals, to = c(0, 65535), from = c(min(vals, na.rm = T), max(vals, na.rm = T)))
-  dem_resamp[[1]] = vals_rescaled
+  vals = dem_resamp[[1]] %>% as.vector()
+  mn = min(vals, na.rm=T)
+  mx = max(vals, na.rm=T)
+  tmpName_rescale = paste(tempdir(), "/temp_scale.tif", sep="")
+  cmd = glue::glue("gdal_translate -of GTiff -ot UInt16 -a_nodata 0.0 -scale {mn} {mx} 0 65535 {tmpName_resamp} {tmpName_rescale}")
+  system(cmd)
+  dem_rescale = stars::read_stars(tmpName_rescale)
 
   # 3. add "border"
   cli::cli_h1("Adding Border")
   if (!is.null(add.x) && !is.null(add.y)) {
-    dem_resamp = make_border(dem_resamp, add.x, add.y)
+    dem_border = make_border(dem_rescale, add.x, add.y)
   }
 
   # 4. write it out as Uint16
   cli::cli_h1("Writing it out")
-  if (is.null(dsn))
+  if (is.null(dsn)){
     stop("Provide an output filename")
+
+  }
   filename = basename(dsn)
   directory = dirname(dsn)
   if (!dir.exists(directory)){
